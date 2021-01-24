@@ -5,13 +5,16 @@ module Lib (
 ) where
 
 import Control.Exception (bracket_)
-import Control.Monad (filterM, replicateM_, unless, void, when)
+import Control.Monad (filterM, guard, replicateM_, unless, void, when)
 import Control.Monad.State (StateT, gets, liftIO, modify)
+import Control.Monad.Trans (lift)
+import Control.Monad.Trans.Maybe (MaybeT, runMaybeT)
 import Control.Monad.Writer (WriterT, runWriterT, tell)
 import Data.Bits ((.&.))
-import Data.Char (chr, ord)
+import Data.Char (chr, isDigit, ord)
+import Data.Functor ((<&>))
 import Data.List (intercalate)
-import Data.Maybe (maybe)
+import Data.Maybe (fromMaybe, maybe)
 import Data.Word (Word8)
 import Foreign.C.Types (CSize (CSize))
 import Foreign.Marshal.Alloc (allocaBytes)
@@ -79,16 +82,9 @@ getWindow = do
   theHardWay = do
     _write "\x1b[999C\x1b[999B"
     _write "\x1b[6n"
-    bs <- readUntil $ ord 'R'
-    let (h, _ : w) = break (== ';') $ chr <$> drop 2 bs
+    EscapeSeq bs <- readKey
+    let (h, _ : w) = break (== ';') $ drop 2 (init bs)
     return $ Window (read h :: Int) (read w :: Int)
-
-  readUntil b = _readUntil [] b
-  _readUntil acc b =
-    readKey >>= \b' ->
-      if b == b'
-        then return $ reverse acc
-        else _readUntil (b' : acc) b
 
 
 enterRawMode :: IO TerminalAttributes
@@ -120,31 +116,92 @@ _write = void . fdWrite stdOutput
 write = liftIO . _write
 
 
-readKey :: IO Int
-readKey = liftIO $ allocaBytes 1 _readKey
+data SpecialKey
+  = ArrowLeft
+  | ArrowRight
+  | ArrowUp
+  | ArrowDown
+  | PageUp
+  | PageDown
+  | Home
+  | End
+  | Delete
+  deriving (Show, Eq)
+
+
+data PressedKey
+  = EscapeSeq String
+  | SpecialKey SpecialKey
+  | NormalKey Char
+  deriving (Show, Eq)
+
+
+readKey :: IO PressedKey
+readKey = allocaBytes 1 _readKey
  where
+  _readFallible :: Ptr Word8 -> MaybeT IO Char
+  _readFallible mem = do
+    lift $ poke mem 0
+    nRead <- lift $ fdReadBuf stdInput mem $ CSize 1
+    guard $ nRead == 1
+    lift $ peek mem <&> chr . fromIntegral
+
   _readKey mem = do
-    poke mem 0
-    nRead <- fdReadBuf stdInput mem $ CSize 1
-    if nRead == 1
-      then fromIntegral <$> peek mem
-      else _readKey mem
+    c <- runMaybeT $ _readFallible mem
+    case c of
+      Just '\x1b' -> _maybeEscapeSeq
+      Just c' -> return $ NormalKey c'
+      Nothing -> _readKey mem
+
+  _maybeEscapeSeq = do
+    maybeSeq <- allocaBytes 1 $ \mem -> runMaybeT $ do
+      c0 <- _readFallible mem
+      guard $ c0 `elem` ['[', 'O']
+      c <- _readFallible mem
+      if c0 == '['
+        then case c of
+          'A' -> return $ SpecialKey ArrowUp
+          'B' -> return $ SpecialKey ArrowDown
+          'C' -> return $ SpecialKey ArrowRight
+          'D' -> return $ SpecialKey ArrowLeft
+          'H' -> return $ SpecialKey Home
+          'F' -> return $ SpecialKey End
+          _ | isDigit c -> do
+            '~' <- _readFallible mem
+            return . SpecialKey $ case c of
+              '1' -> Home
+              '3' -> Delete
+              '4' -> End
+              '5' -> PageUp
+              '6' -> PageDown
+              '7' -> Home
+              '8' -> End
+          _ -> return $ NormalKey '\x1b'
+        else case c of
+          'H' -> return $ SpecialKey Home
+          'F' -> return $ SpecialKey End
+    return $ fromMaybe (NormalKey '\x1b') maybeSeq
 
 
-processKeyPress :: EditorM Bool
-processKeyPress =
-  liftIO readKey >>= \c ->
-    if c == ctrlKey 'q'
-      then return False
-      else do
-        Window h w <- gets window
-        case chr c of
-          'w' -> modifyCursorPos $ \p -> p {y = max 0 $ y p - 1}
-          'a' -> modifyCursorPos $ \p -> p {x = max 0 $ x p - 1}
-          's' -> modifyCursorPos $ \p -> p {y = min (h - 1) $ y p + 1}
-          'd' -> modifyCursorPos $ \p -> p {x = min (w - 1) $ x p + 1}
-          _ -> return ()
-        return True
+processKeyPress :: PressedKey -> EditorM Bool
+processKeyPress c =
+  case c of
+    NormalKey c' -> return $ ord c' /= ctrlKey 'q'
+    SpecialKey k -> do
+      Window h w <- gets window
+      case k of
+        ArrowUp -> modifyCursorPos $ \p -> p {y = max 0 $ y p - 1}
+        ArrowLeft -> modifyCursorPos $ \p -> p {x = max 0 $ x p - 1}
+        ArrowDown -> modifyCursorPos $ \p -> p {y = min (h - 1) $ y p + 1}
+        ArrowRight -> modifyCursorPos $ \p -> p {x = min (w - 1) $ x p + 1}
+        Home -> modifyCursorPos $ \p -> p {x = 0}
+        End -> modifyCursorPos $ \p -> p {x = w - 1}
+        _
+          | k == PageDown || k == PageUp ->
+            replicateM_ h . processKeyPress . SpecialKey $
+              if k == PageDown then ArrowDown else ArrowUp
+      return True
+    _ -> return True
  where
   ctrlKey c = ord c .&. 0x1f
 
@@ -205,7 +262,7 @@ drawRows = do
 runEditor :: EditorM ()
 runEditor = do
   batchedWrite drawScreen
-  result <- processKeyPress
+  result <- liftIO readKey >>= processKeyPress
   when result runEditor
 
 
