@@ -1,0 +1,3 @@
+comma-style: leading
+record-brace-space: true
+newlines-between-decls: 2

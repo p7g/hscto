@@ -1,0 +1,13 @@
+cradle:
+  cabal:
+    - path: "src"
+      component: "lib:hscto"
+
+    - path: "app/Main.hs"
+      component: "hscto:exe:hscto-exe"
+
+    - path: "app/Paths_hscto.hs"
+      component: "hscto:exe:hscto-exe"
+
+    - path: "test"
+      component: "hscto:test:hscto-test"
