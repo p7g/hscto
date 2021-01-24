@@ -8,6 +8,3 @@ cradle:
 
     - path: "app/Paths_hscto.hs"
       component: "hscto:exe:hscto-exe"
-
-    - path: "test"
-      component: "hscto:test:hscto-test"

@@ -180,6 +180,7 @@ readKey = allocaBytes 1 _readKey
         else case c of
           'H' -> return $ SpecialKey Home
           'F' -> return $ SpecialKey End
+          _ -> return $ NormalKey '\x1b'
     return $ fromMaybe (NormalKey '\x1b') maybeSeq
 
 
@@ -227,7 +228,7 @@ drawScreen = do
   showCursor = tell "\x1b[?25h"
 
 
-batchedWrite :: WriterT String EditorM () -> EditorM ()
+batchedWrite :: BatchedWriteM -> EditorM ()
 batchedWrite m = do
   ((), msg) <- runWriterT m
   write msg
